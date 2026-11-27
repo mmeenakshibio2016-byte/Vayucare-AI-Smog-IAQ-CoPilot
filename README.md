@@ -22,5 +22,20 @@ Global City Search & Live Open-Meteo 72-Hour Weather & Air Quality Engine:
 Integrated Open-Meteo's Geocoding, Weather Forecast, and Air Quality APIs so selecting any city marker, searching any city worldwide, or clicking Detect My Weather fetches real-time temperature, humidity, wind vectors, 
 PM2.5,PM 2.5 and 72-hour hourly AQI forecasts (with instant fallback data when offline).
 
+## Run locally
+
+```bash
+python -m pip install -r requirements.txt
+python -m streamlit run Server.py
+```
+
+## Deploy on Streamlit Community Cloud
+
+1. Push this repository, including `Server.py` and `requirements.txt`, to GitHub.
+2. In [Streamlit Community Cloud](https://share.streamlit.io/), create an app from this repository and select the branch and `Server.py` as the app entry point.
+3. Optionally add a `GOOGLE_API_KEY` secret in the app's settings to enable the personalized Gemini plan. The app works without this secret.
+
+Streamlit Community Cloud installs dependencies from `requirements.txt` automatically.
+
 
 
