@@ -7,6 +7,7 @@ from urllib.parse import quote
 import pandas as pd
 import requests
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
 
 st.set_page_config(
@@ -59,6 +60,27 @@ def geocode_city(city):
     }
 
 
+def get_city_coordinates(city):
+    city = city.strip()
+    try:
+        location = geocode_city(city)
+    except requests.RequestException:
+        location = None
+
+    if location:
+        latitude = location["latitude"]
+        longitude = location["longitude"]
+        name = f"{location['name']}, {location['country']}".strip(", ")
+        return name, latitude, longitude
+
+    profile_city = next((name for name in CITY_PROFILES if name.casefold() == city.casefold()), None)
+    if profile_city:
+        latitude, longitude = CITY_PROFILES[profile_city]
+        return profile_city, latitude, longitude
+
+    raise ValueError(f"Could not find coordinates for {city!r}. Check the city name and try again.")
+
+
 @st.cache_data(ttl=900)
 def fetch_weather(latitude, longitude):
     response = requests.get(
@@ -108,9 +130,8 @@ def aqi_category(aqi):
     return "Hazardous", "#7f1d1d"
 
 
-def fallback_weather(latitude, longitude):
+def fallback_weather():
     now = datetime.now()
-    hours = [now.replace(minute=0, second=0, microsecond=0).isoformat()]
     hourly = {
         "time": [],
         "temperature_2m": [],
@@ -152,26 +173,23 @@ def fallback_air_quality():
 
 
 def load_location(city):
-    location = geocode_city(city)
-    if location:
-        latitude = location["latitude"]
-        longitude = location["longitude"]
-        name = f"{location['name']}, {location['country']}".strip(", ")
-    else:
-        latitude, longitude = CITY_PROFILES.get(city, (28.6139, 77.2090))
-        name = city
+    name, latitude, longitude = get_city_coordinates(city)
+    weather_is_estimated = False
+    air_is_estimated = False
 
     try:
         weather = fetch_weather(latitude, longitude)
     except requests.RequestException:
-        weather = fallback_weather(latitude, longitude)
+        weather = fallback_weather()
+        weather_is_estimated = True
 
     try:
         air = fetch_air_quality(latitude, longitude)
     except requests.RequestException:
         air = fallback_air_quality()
+        air_is_estimated = True
 
-    return name, latitude, longitude, weather, air
+    return name, latitude, longitude, weather, air, weather_is_estimated, air_is_estimated
 
 
 def build_forecast(weather, air):
@@ -181,6 +199,21 @@ def build_forecast(weather, air):
     air_times = air_hourly.get("time", [])
     if not weather_times or not air_times:
         raise ValueError("Forecast data is unavailable")
+
+    weather_values = [
+        weather_hourly.get("temperature_2m"),
+        weather_hourly.get("relative_humidity_2m"),
+        weather_hourly.get("wind_speed_10m"),
+    ]
+    air_values = [
+        air_hourly.get("pm2_5"),
+        air_hourly.get("pm10"),
+        air_hourly.get("us_aqi"),
+    ]
+    if any(values is None or len(values) != len(weather_times) for values in weather_values):
+        raise ValueError("Weather forecast data is incomplete")
+    if any(values is None or len(values) != len(air_times) for values in air_values):
+        raise ValueError("Air-quality forecast data is incomplete")
 
     frame = pd.DataFrame({
         "time": pd.to_datetime(weather_times),
@@ -194,10 +227,16 @@ def build_forecast(weather, air):
         "pm10": air_hourly.get("pm10"),
         "aqi": air_hourly.get("us_aqi"),
     })
-    return frame.merge(air_frame, on="time", how="inner")
+    forecast = frame.merge(air_frame, on="time", how="inner")
+    numeric_columns = ["temperature", "humidity", "wind", "pm25", "pm10", "aqi"]
+    forecast[numeric_columns] = forecast[numeric_columns].apply(pd.to_numeric, errors="coerce")
+    forecast = forecast.dropna(subset=numeric_columns)
+    if forecast.empty:
+        raise ValueError("No complete weather and air-quality forecast hours are available")
+    return forecast
 
 
-def summarize_plan(forecast, location_name):
+def summarize_plan(forecast):
     peak = forecast.loc[forecast["aqi"].idxmax()]
     safe = forecast.loc[forecast["aqi"].idxmin()]
     low_wind = forecast.loc[forecast["wind"].idxmin()]
@@ -205,20 +244,22 @@ def summarize_plan(forecast, location_name):
     peak_time = pd.Timestamp(peak["time"]).strftime("%a %I:%M %p")
     safe_time = pd.Timestamp(safe["time"]).strftime("%a %I:%M %p")
     low_wind_time = pd.Timestamp(low_wind["time"]).strftime("%a %I:%M %p")
-    pm25_reduction = max(20, min(55, round(100 - float(safe["aqi"]))))
-
     return {
         "peak_time": peak_time,
         "peak_aqi": round(float(peak["aqi"])),
         "safe_time": safe_time,
         "safe_aqi": round(float(safe["aqi"])),
         "low_wind_time": low_wind_time,
-        "pm25_reduction": pm25_reduction,
     }
 
 
-def generate_llm_plan(location_name, household, forecast, summary):
-    api_key = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
+def generate_llm_plan(location_name, household, activities, forecast, summary):
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        try:
+            api_key = st.secrets["GOOGLE_API_KEY"]
+        except (KeyError, StreamlitSecretNotFoundError):
+            api_key = None
     if not api_key:
         return None
 
@@ -227,11 +268,17 @@ def generate_llm_plan(location_name, household, forecast, summary):
         from google.genai import types
 
         client = genai.Client(api_key=api_key)
+        forecast_rows = forecast.head(24).copy()
+        forecast_rows["time"] = forecast_rows["time"].astype(str)
         prompt = (
             f"Create a concise 72-hour indoor and outdoor air-quality action plan for "
-            f"{location_name}. Household: {household}. Forecast summary: {json.dumps(summary)}. "
-            "Include commute timing, exercise timing, window/ventilation guidance, purifier guidance, "
-            "Corsi-Rosenthal box or wet-mopping alternatives, and low-emission swaps."
+            f"{location_name}. Household profile: {household}. Daily concerns: "
+            f"{json.dumps(activities)}. Forecast summary: {json.dumps(summary)}. "
+            f"Next 24 hourly weather and air-quality readings: "
+            f"{forecast_rows.to_json(orient='records')}. "
+            "Prioritize the selected concerns, recommend actions at the forecast times, and explain "
+            "for each action its likely exposure or emissions benefit without inventing numerical "
+            "health impacts. Include practical indoor filtration, ventilation, and low-emission swaps."
         )
         response = client.models.generate_content(
             model="gemini-2.0-flash",
@@ -240,24 +287,26 @@ def generate_llm_plan(location_name, household, forecast, summary):
         )
         return response.text
     except Exception as exc:
-        st.caption(f"AI coach unavailable: {exc}")
+        st.caption(f"AI coach unavailable ({type(exc).__name__}); showing the preventive routine.")
         return None
 
 
 def render_map(latitude, longitude, location_name, forecast):
     markers = [{"name": location_name, "lat": latitude, "lon": longitude, "aqi": forecast.iloc[0]["aqi"]}]
-    for name, lat, lon in STATIONS.get(location_name.split(",")[0], []):
-        markers.append({"name": name, "lat": lat, "lon": lon, "aqi": forecast.iloc[0]["aqi"]})
+    city_name = location_name.split(",")[0]
+    for name, lat, lon in STATIONS.get(city_name, []):
+        markers.append({"name": name, "lat": lat, "lon": lon, "aqi": None})
 
-    marker_js = []
     for marker in markers:
-        category, color = aqi_category(float(marker["aqi"]))
-        marker_js.append(
-            f"""L.circleMarker([{marker["lat"]}, {marker["lon"]}], {{
-                radius: 10, color: "{color}", fillColor: "{color}", fillOpacity: 0.75
-            }}).addTo(map).bindPopup("<b>{marker["name"]}</b><br>AQI {round(marker["aqi"])} - {category}");
-            """
-        )
+        if marker["aqi"] is None:
+            marker["category"] = "Map reference only; not a station measurement"
+            marker["color"] = "#94a3b8"
+        else:
+            category, color = aqi_category(float(marker["aqi"]))
+            marker["category"] = category
+            marker["color"] = color
+            marker["aqi"] = round(float(marker["aqi"]))
+    marker_data = json.dumps(markers).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
     html = f"""
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -268,7 +317,16 @@ def render_map(latitude, longitude, location_name, forecast):
       L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
         attribution: '&copy; OpenStreetMap &copy; CARTO'
       }}).addTo(map);
-      {''.join(marker_js)}
+      const markers = {marker_data};
+      markers.forEach((marker) => {{
+        const popup = document.createElement('div');
+        popup.textContent = marker.aqi === null
+          ? `${{marker.name}}: ${{marker.category}}`
+          : `${{marker.name}}: AQI ${{marker.aqi}} - ${{marker.category}}`;
+        L.circleMarker([marker.lat, marker.lon], {{
+          radius: 10, color: marker.color, fillColor: marker.color, fillOpacity: 0.75
+        }}).addTo(map).bindPopup(popup);
+      }});
     </script>
     """
     st.components.v1.html(html, height=430)
@@ -301,13 +359,32 @@ if detect_location:
         st.warning("Browser location was unavailable. Showing the selected city instead.")
 
 try:
-    location_name, latitude, longitude, weather, air = load_location(city)
+    (
+        location_name,
+        latitude,
+        longitude,
+        weather,
+        air,
+        weather_is_estimated,
+        air_is_estimated,
+    ) = load_location(city)
     forecast = build_forecast(weather, air)
 except (requests.RequestException, ValueError, TypeError) as exc:
     st.error(f"Weather data could not be loaded: {exc}")
     st.stop()
 
-summary = summarize_plan(forecast, location_name)
+if weather_is_estimated or air_is_estimated:
+    estimated_sources = []
+    if weather_is_estimated:
+        estimated_sources.append("weather")
+    if air_is_estimated:
+        estimated_sources.append("air-quality")
+    st.warning(
+        f"Live {' and '.join(estimated_sources)} data is unavailable. "
+        "Estimated offline values are shown; do not treat them as current local conditions."
+    )
+
+summary = summarize_plan(forecast)
 current = forecast.iloc[0]
 category, category_color = aqi_category(float(current["aqi"]))
 
@@ -361,21 +438,41 @@ with tab_plan:
     c2.success(f"Best window: {summary['safe_time']} (AQI {summary['safe_aqi']})")
     c3.info(f"Lowest dispersion: {summary['low_wind_time']}")
 
-    ai_plan = generate_llm_plan(location_name, household, forecast, summary)
+    ai_plan = generate_llm_plan(location_name, household, activities, forecast, summary)
     if ai_plan:
         st.subheader("Personalized AI plan")
         st.markdown(ai_plan)
     else:
         st.subheader("Preventive daily routine")
         st.markdown(
-            f"""
-- **{summary['safe_time']}:** Open windows only if outdoor AQI remains below 100.
-- **{summary['peak_time']}:** Seal window gaps, keep children indoors, and run a HEPA or well-fitted purifier.
-- **Commute:** Shift outdoor activity toward lower-AQI forecast hours and use public transit or walking less near traffic.
-- **Cooking:** Prefer induction or electric cooking during smog traps; use an exhaust fan that vents outdoors.
-- **Cleaning:** Use wet mopping instead of dry sweeping to reduce resuspended dust.
-"""
+            f"**{summary['safe_time']} — Ventilation:** This is the lowest-AQI forecast window. "
+            "If outdoor conditions remain favorable, brief ventilation can refresh indoor air "
+            "before closing windows during higher-pollution periods."
         )
+        st.markdown(
+            f"**{summary['peak_time']} — Protection:** This is the forecast pollution peak. "
+            "Keep windows closed and run a correctly sized, well-maintained particle filter "
+            "to reduce outdoor particle entry and indoor particle levels."
+        )
+        if "School commute" in activities:
+            st.markdown("**School commute:** When schedules allow, travel outside the peak window, "
+                        "choose a route away from congested roads, and carpool or use transit to reduce "
+                        "time near tailpipe emissions and per-trip vehicle emissions.")
+        if "Outdoor exercise" in activities:
+            st.markdown("**Exercise:** Move strenuous outdoor activity to the lowest-AQI forecast window "
+                        "or exercise indoors during the peak to reduce inhaled pollution while active.")
+        if "Open-window ventilation" in activities:
+            st.markdown("**Ventilation:** Use the lower-AQI window for a short air exchange; keeping "
+                        "windows shut at the forecast peak limits the period when outdoor particles can enter.")
+        if "Indoor cooking" in activities:
+            st.markdown("**Cooking:** Prefer induction/electric cooking when available and use an externally "
+                        "vented hood; this avoids combustion particles from gas cooking and removes cooking emissions.")
+        if household != "General household":
+            st.info(f"Because your household profile is **{household.lower()}**, prioritize reducing "
+                    "time outdoors during the peak and follow any clinician-provided health plan.")
+        st.markdown("**Low-emission and low-cost swaps:** Carpool or take transit for suitable trips, "
+                    "wet-mop instead of dry-sweep, and avoid incense, smoking, and candles. These choices "
+                    "reduce traffic emissions or prevent additional particles from being generated indoors.")
 
 with tab_iaq:
     st.subheader("Low-cost IAQ actions")
@@ -385,8 +482,8 @@ with tab_iaq:
 ### Corsi-Rosenthal box
 Use four boxed fan filters in an enclosed cube, orient the fan outward, and keep it away from curtains.
 
-**Estimated impact:** sealing leaks and continuous filtration may reduce indoor PM2.5 exposure by
-about **{summary['pm25_reduction']}%** during a smog trap.
+**Impact:** particle filtration captures airborne particles while sealing drafts reduces the amount
+of outdoor pollution entering the room. Actual results vary with room size, filter fit, and airflow.
 """
     )
     i2.markdown(

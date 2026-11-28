@@ -15,12 +15,12 @@ Project Blue Print:
 3.DIY Indoor Air Quality (IAQ) Hacks: Cost-effective, accessible solutions tailored to local living conditions, such as building a Corsi-Rosenthal box, strategic placement of indoor air-purifying plants, and natural humidity control to settle airborne dust.
 Interactive Dark-Mode City Smog & Wind Map (#smog-leaflet-map) + Google Maps Integration:
 
-Connected New Delhi, Kolkata, Los Angeles, and any searched or GPS-detected city on an interactive dark-mode map with pulsing AQI markers, clickable neighborhood monitoring stations (e.g., Anand Vihar, ITO, RK Puram in Delhi; Ballygunge, Victoria Memorial, Salt Lake in Kolkata; Downtown LA, Burbank, Long Beach in LA), a one-click Google Maps View embed toggle, and a direct Open in Google Maps link.
+Connected New Delhi, Kolkata, Los Angeles, and any searched or GPS-detected city on an interactive dark-mode map with AQI markers, neighborhood reference pins (not station-level readings; e.g., Anand Vihar, ITO, RK Puram in Delhi; Ballygunge, Victoria Memorial, Salt Lake in Kolkata; Downtown LA, Burbank, Long Beach in LA), and direct Open in Google Maps links.
 
 Global City Search & Live Open-Meteo 72-Hour Weather & Air Quality Engine:
 
-Integrated Open-Meteo's Geocoding, Weather Forecast, and Air Quality APIs so selecting any city marker, searching any city worldwide, or clicking Detect My Weather fetches real-time temperature, humidity, wind vectors, 
-PM2.5,PM 2.5 and 72-hour hourly AQI forecasts (with instant fallback data when offline).
+Integrated Open-Meteo's Geocoding, Weather Forecast, and Air Quality APIs so searching any city worldwide or clicking Detect My Weather fetches temperature, humidity, wind vectors,
+PM2.5, PM10, and 72-hour hourly AQI forecasts (with clearly labeled estimated fallback data when offline).
 
 ## Run locally
 
@@ -37,5 +37,15 @@ python -m streamlit run Server.py
 
 Streamlit Community Cloud installs dependencies from `requirements.txt` automatically.
 
+## Demo recording guide
+
+Record a 60–90 second walkthrough in a 16:9 browser window. Use captions or clear narration, and do not show API keys or other secrets.
+
+1. Introduce VayuCare and enter a city such as New Delhi.
+2. Show the current AQI and the 72-hour AQI/PM2.5 forecast, pointing out the predicted peak and lowest-AQI window.
+3. Select a household profile and daily concerns; show how the routine changes and explain each action's exposure or emissions benefit.
+4. Open the IAQ toolkit to demonstrate filtration, ventilation, and low-emission alternatives.
+5. Show the city map and explain that neighborhood pins are map references, not station-level measurements.
+6. Close by noting that offline values are estimates and the app does not replace public-health guidance.
 
 
