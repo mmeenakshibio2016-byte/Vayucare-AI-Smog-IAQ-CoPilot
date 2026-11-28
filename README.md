@@ -37,6 +37,10 @@ python -m streamlit run Server.py
 
 Streamlit Community Cloud installs dependencies from `requirements.txt` automatically.
 
+## Live app
+
+[Open VayuCare AI](https://vayucare-ai-smog-iaq-copilot.streamlit.app/)
+
 ## Demo recording guide
 
 Record a 60–90 second walkthrough in a 16:9 browser window. Use captions or clear narration, and do not show API keys or other secrets.
